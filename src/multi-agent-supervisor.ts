@@ -59,8 +59,8 @@ async function supervisor(
   const systemMessage = new SystemMessage(
     createLeadResearcherPrompt(
       getToday(),
-      maxConcurrentResearchUnits,
-      maxResearcherIterations,
+      String(maxConcurrentResearchUnits),
+      String(maxResearcherIterations),
     ),
   );
   const messages = [systemMessage, ...supervisorMessages];
@@ -102,7 +102,7 @@ async function supervisorTools(
   let shouldEnd = false;
 
   // Check exit criteria first
-  const exceededIterations = researchIterations >= 6;
+  const exceededIterations = researchIterations >= maxResearcherIterations;
   const noToolCalls = !(mostRecentMessage as AIMessage)?.tool_calls;
   const researchComplete = (mostRecentMessage as AIMessage)?.tool_calls?.some(
     (toolCall: any) => toolCall.name === "ResearchComplete",
@@ -120,9 +120,27 @@ async function supervisorTools(
         (toolCall: any) => toolCall.name === "think_tool",
       );
 
-      const conductResearchCalls = toolCalls.filter(
+      const allConductResearchCalls = toolCalls.filter(
         (toolCall: any) => toolCall.name === "ConductResearch",
       );
+
+      // Enforce the concurrency limit: run the first N, reject the rest with
+      // an explanatory ToolMessage so the supervisor can re-issue them later.
+      const conductResearchCalls = allConductResearchCalls.slice(
+        0,
+        maxConcurrentResearchUnits,
+      );
+      for (const overflow of allConductResearchCalls.slice(
+        maxConcurrentResearchUnits,
+      )) {
+        toolMessages.push(
+          new ToolMessage(
+            `Error: exceeded the maximum of ${maxConcurrentResearchUnits} concurrent research units. Re-issue this ConductResearch call in a later step.`,
+            overflow.id || "",
+            overflow.name || "",
+          ),
+        );
+      }
 
       // Handle think_tool calls
       for (const toolCall of thinkToolCalls) {
@@ -146,14 +164,28 @@ async function supervisorTools(
         // Launch parallel research agents
         const researchPromises = conductResearchCalls.map(
           async (toolCall: any) => {
-            const result = await researcherAgent.invoke({
-              researcher_messages: [
-                new HumanMessage(toolCall.args.research_topic),
-              ],
-              research_topic: toolCall.args.research_topic,
-            });
-
-            return { result, toolCall };
+            try {
+              const result = await researcherAgent.invoke({
+                researcher_messages: [
+                  new HumanMessage(toolCall.args.research_topic),
+                ],
+                research_topic: toolCall.args.research_topic,
+              });
+              return { result, toolCall };
+            } catch (error) {
+              // One failing researcher must not sink the whole batch.
+              console.error(
+                `Researcher failed for topic "${toolCall.args.research_topic}":`,
+                error,
+              );
+              return {
+                result: {
+                  compressed_research: `Error: research on this topic failed (${String(error)}).`,
+                  raw_notes: [],
+                },
+                toolCall,
+              };
+            }
           },
         );
 

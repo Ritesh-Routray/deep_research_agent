@@ -31,8 +31,8 @@ The system consists of four main components:
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
-cd deep-reasearch-ts
+git clone https://github.com/iamtokarev/deep-research-ts.git
+cd deep-research-ts
 ```
 
 2. Install dependencies:
@@ -55,6 +55,17 @@ AZURE_OPENAI_API_DEPLOYMENT_NAME_4_1_MINI=your_gpt4_mini_deployment
 AZURE_OPENAI_API_VERSION_4_1_MINI=your_mini_api_version
 AZURE_OPENAI_API_INSTANCE_NAME=your_instance_name
 ```
+
+### Optional Settings
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MAX_CONCURRENT_RESEARCH_UNITS` | `3` | Max researcher sub-agents run in parallel per supervisor step. Extra `ConductResearch` calls are rejected with a message so the supervisor can re-issue them. |
+| `MAX_RESEARCHER_ITERATIONS` | `6` | Max supervisor iterations before research is forced to end. |
+| `TAVILY_MAX_RESULTS` | `3` | Search results fetched per Tavily query. |
+| `SCOPING_MODEL_TEMPERATURE` | – | Reserved for the scoping model. |
+
+Invalid (non-numeric or non-positive) values fall back to the defaults with a warning, and a warning listing any missing required variables is printed at startup.
 
 ## Usage
 
@@ -94,11 +105,33 @@ In LangGraph Studio, try queries like:
 5. **Synthesis**: Findings are compressed and aggregated across all research threads
 6. **Report Generation**: Creates a comprehensive final report with all discoveries
 
+## Reliability Notes
+
+- A failing researcher sub-agent no longer aborts the whole batch; its error is reported back to the supervisor as that topic's result.
+- Webpage summaries for search results are generated concurrently.
+- Search-result handling tolerates empty or failed query responses.
+- Iteration and concurrency limits come from configuration rather than hard-coded values.
+
+## Project Structure
+
+```
+src/
+  config.ts                 # env parsing, Tavily client, model secrets
+  llm/factory.ts            # AzureChatOpenAI factory
+  research-scoping.ts       # clarification + research brief
+  research-agent.ts         # single researcher loop (search/think/compress)
+  multi-agent-supervisor.ts # parallel delegation to researchers
+  full-research.ts          # end-to-end graph incl. final report
+  shared/                   # prompts and zod/state types
+  utils.ts                  # search, summarization and tool definitions
+```
+
 ## Development
 
-Build the project:
+Build or type-check the project:
 ```bash
 npm run build
+npm run typecheck
 ```
 
 For more detailed development information, see [CLAUDE.md](./CLAUDE.md).

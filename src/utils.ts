@@ -1,11 +1,11 @@
 /**
  * Research Utilities and Tools.
  *
- * This module porives search content processint utilities for the research agent,
+ * This module provides search and content processing utilities for the research agent,
  * including web search capabilities and content summarization tools.
  */
 
-import { tavilyClient } from "./config";
+import { tavilyClient, tavilyMaxResults } from "./config";
 import { createSummarizeWebpagePrompt } from "./shared/prompts";
 import { Summary } from "./shared/types";
 import {
@@ -15,16 +15,9 @@ import {
 } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod/v3";
-import { AzureChatOpenAI } from "@langchain/openai";
-import { modelSecrets } from "./config";
+import { createChatModel } from "./llm/factory";
 
-const llm = new AzureChatOpenAI({
-  model: "gpt-4.1-mini",
-  azureOpenAIApiKey: modelSecrets.gpt41Mini.apiKey,
-  azureOpenAIApiDeploymentName: modelSecrets.gpt41Mini.apiDeploymentName,
-  azureOpenAIApiVersion: modelSecrets.gpt41Mini.apiVersion,
-  azureOpenAIApiInstanceName: modelSecrets.gpt41Mini.apiInstanceName,
-});
+const llm = createChatModel({ family: "gpt41Mini", model: "gpt-4.1-mini" });
 
 const structuredModel = llm.withStructuredOutput(Summary);
 
@@ -46,7 +39,7 @@ export function getToday(): string {
 // ===== SEARCH FUNCTIONS =====
 
 /**
- * Perform search suing Tavily API for multiple queries
+ * Perform search using Tavily API for multiple queries
  * @param searchQueries - List of search queries to execute
  * @param maxResults - Maximum number of results per query
  * @param topic - Topic filter for search queries
@@ -99,7 +92,7 @@ export async function summarizeWebpageContent(
 }
 
 /**
- * Deduplicate seaerch results by URL to avoid processing duplicate content.
+ * Deduplicate search results by URL to avoid processing duplicate content.
  * @param searchResults - List of search results
  * @returns Dictionary mapping URLs to unique results
  */
@@ -109,7 +102,7 @@ export async function deduplicateSearchResults(
   let uniqueResults: Record<string, any> = {};
 
   for (const response of searchResults) {
-    for (const result of response.results) {
+    for (const result of response?.results ?? []) {
       const url = result.url;
       if (!uniqueResults[url]) {
         uniqueResults[url] = result;
@@ -128,23 +121,16 @@ export async function deduplicateSearchResults(
 export async function processSearchResults(
   uniqueResults: Record<string, any>,
 ): Promise<Record<string, any>> {
-  let summarizedResults: Record<string, any> = {};
-
-  for (const [url, result] of Object.entries(uniqueResults)) {
-    // Use existing content if no raw content for summarization
-    let content: string;
-    if (!result.rawContent) {
-      content = result.content;
-    } else {
-      // Summarize raw content for better processing
-      content = await summarizeWebpageContent(result.rawContent);
-    }
-
-    summarizedResults[url] = {
-      title: result.title,
-      content: content,
-    };
-  }
+  // Summarize all pages concurrently instead of one at a time.
+  const entries = await Promise.all(
+    Object.entries(uniqueResults).map(async ([url, result]) => {
+      const content: string = result.rawContent
+        ? await summarizeWebpageContent(result.rawContent)
+        : result.content;
+      return [url, { title: result.title, content }] as const;
+    }),
+  );
+  const summarizedResults: Record<string, any> = Object.fromEntries(entries);
 
   return summarizedResults;
 }
@@ -152,7 +138,7 @@ export async function processSearchResults(
 /**
  * Format search results into a well-structured string output.
  * @param summarizedResults - Dictionary of processed search results
- * @returns Formatted string of search resutls with clear source separation
+ * @returns Formatted string of search results with clear source separation
  */
 export async function formatSearchOutput(
   summarizedResults: Record<string, any>,
@@ -199,7 +185,7 @@ export const tavilySearch = tool(
   async (input: SearchFields): Promise<string> => {
     const { query } = input;
 
-    const maxResults = 3;
+    const maxResults = tavilyMaxResults;
     const topic = "general";
 
     // Execute search for a single query
@@ -227,25 +213,25 @@ function createThinkToolFields() {
     reflection: z
       .string()
       .describe(
-        "Your detailed reflection on reserach progress, findings, gaps and next steps.",
+        "Your detailed reflection on research progress, findings, gaps and next steps.",
       ),
   });
 
   return {
     name: "think_tool",
     description:
-      "Use this tool after each search to analyze results and plant next steps sytematically." +
+      "Use this tool after each search to analyze results and plan next steps systematically." +
       "This creates a deliberate pause in the research workflow for quality decision-making." +
       "When to use: " +
       "- After receiving search results: What key information did I find?" +
-      "- Before decideing next steps: Do i have neough to answer comprehensively?" +
-      "- When assesing research gaps: What specific information am I still missing?" +
-      "- Before concluding research: Cna I provide a complete answer now?" +
+      "- Before deciding next steps: Do I have enough to answer comprehensively?" +
+      "- When assessing research gaps: What specific information am I still missing?" +
+      "- Before concluding research: Can I provide a complete answer now?" +
       " Reflection should address:" +
-      "1. Analysis of current findigs - What concrete information have I gathered?" +
-      "2. Gap assessment - What cruicial information is still missing?" +
+      "1. Analysis of current findings - What concrete information have I gathered?" +
+      "2. Gap assessment - What crucial information is still missing?" +
       "3. Quality evaluation - Do I have sufficient evidence/examples for a good answer?" +
-      "4. Strategic decidsion - Should i continue seraching or provide my answer?",
+      "4. Strategic decision - Should I continue searching or provide my answer?",
     schema: thinkFieldsSchema,
   };
 }
@@ -294,13 +280,13 @@ export const ResearchComplete = tool(async () => {}, {
 /**
  * Extract research notes from ToolMessage objects in supervisor message history.
  *
- * This function retrieves the compressed reserach findings that sub-agents
- * return as ToolMessage content. When the supervisoer delegates research to
+ * This function retrieves the compressed research findings that sub-agents
+ * return as ToolMessage content. When the supervisor delegates research to
  * sub-agents via ConductResearch tool calls, each sub-agent returns its
  * compressed findings as the content of a ToolMessage. This function
  * extracts all such ToolMessage content to compile the final research notes.
  * @param messages - List of messages from supervisor's conversation history
- * @returns List of research not strings extracted from ToolMessage objects
+ * @returns List of research note strings extracted from ToolMessage objects
  */
 export function getNotesFromToolCalls(messages: BaseMessage[]): string[] {
   const toolMessages = filterMessages(messages, { includeTypes: ["tool"] });
